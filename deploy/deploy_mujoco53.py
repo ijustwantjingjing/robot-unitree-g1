@@ -653,7 +653,8 @@ class ArmBaseController:
 
         # 将误差转换到基座坐标系
         R = quat_to_mat(base_quat)
-        pos_error = R.T @ pos_error
+        # 【Jing】不需要进行坐标系转换
+        # pos_error = R.T @ pos_error
 
         # 根据误差大小动态调整步长
         scale = min(0.5, max(0.1, error_norm))
