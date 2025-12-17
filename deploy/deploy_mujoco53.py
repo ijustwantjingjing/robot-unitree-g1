@@ -21,11 +21,14 @@ dir_root = os.path.dirname(os.path.abspath(__file__)).replace("deploy", '')
 # 全局变量，用于走路控制
 cmd = [0, 0, 0]  # 行走命令 [前进速度, 侧向速度, 转向速度]
 xy = [0, 0]  # 目标位置 [x, y]
-switch = False  # 是否激活行走模式
+heading = [0, 0]
+switch_walking = False  # 是否激活行走模式
+switch_heading = False  # 是否激活朝向控制模式
 
 # 实际应用中可以从场景中提取障碍物信息 障碍物格式：(x, y, z, 半径)
-obstacles = [(1.20, -1.65, 0.87, 0.024, 0.024, 0.090)]
-# obstacles = []
+# 会传入到RRT*算法中，用来躲避障碍物
+# obstacles = [(1.20, -1.65, 0.87, 0.024, 0.024, 0.090)]
+obstacles = []
 
 @dataclass
 class ArmConfig:
@@ -83,7 +86,7 @@ class ArmConfig:
     cmd_init: np.ndarray = None
 
     # 高度相关参数
-    height_cmd: float = 0.80  # 默认高度
+    height_cmd: float = 0.74  # 默认高度
     min_height: float = 0.30  # 最小高度
     max_squat_depth: float = 0.3  # 最大下蹲深度
 
@@ -352,7 +355,7 @@ class ArmBaseController:
             rrt = RRTStar3D(
                 start=tuple(current_pos),
                 goal=tuple(position),
-                obstacles=obstacles,
+                obstacles=obstacles, # 全局变量定义的障碍物
                 bounds=bounds,
                 step_size=0.001,  # 较小的步长以获得更平滑的路径
                 max_iter=3000,
@@ -361,6 +364,15 @@ class ArmBaseController:
 
             path = rrt.plan()
             
+            # ================================= print path =================================
+            if path is None:
+                print("No path found.")
+                return
+            
+            print("Path nodes:")
+            for i, (x, y, z) in enumerate(path):
+                print(f"{i}: ({x:.3f}, {y:.3f}, {z:.3f})")
+            # ================================= print path =================================
 
             if path:
                 print(f"RRT规划成功，路径点数量: {len(path)}")
@@ -1339,7 +1351,7 @@ class SquatController:
         if hasattr(config, 'height_cmd'):
             self.height_cmd = config.height_cmd
         else:
-            self.height_cmd = 0.80
+            self.height_cmd = 0.74
 
         self.default_height_cmd = self.height_cmd
 
@@ -1351,9 +1363,9 @@ class SquatController:
 
         # 下蹲状态控制
         self.is_squatting = False
-        self.squat_phase = 0.8  # 0.0-1.0表示下蹲程度
-        self.squat_speed = 0.001  # 下蹲速度
-        self.squat_direction = 1.0  # 1.0表示下蹲，-1.0表示站起
+        # self.squat_phase = 0.8  # 0.0-1.0表示下蹲程度
+        # self.squat_speed = 0.001  # 下蹲速度
+        # self.squat_direction = 1.0  # 1.0表示下蹲，-1.0表示站起
 
         # 走路控制
         self.is_walking = False
@@ -1461,25 +1473,27 @@ class SquatController:
     # 添加走路控制功能
     def toggle_walking(self):
         """切换走路状态"""
-        global switch
+        global switch_walking, switch_heading
         self.is_walking = not self.is_walking
         if self.is_walking:
             print("走路模式已激活")
             # 确保下蹲状态关闭
             self.is_squatting = False
             self.height_cmd = self.default_height_cmd
-            switch = True
+            # switch_walking = True
         else:
             print("走路模式已停止")
             # 重置命令
             self.cmd = np.array([0.0, 0.0, 0.0], dtype=np.float32)
-            switch = False
+            switch_walking = False
+            switch_heading = False
 
     def update_walking_cmd(self):
         """更新走路命令"""
-        global switch, xy, cmd
+        global switch_walking, xy, cmd
+        # print("update_walking_cmd")
         # 检查全局走路开关
-        if not self.is_walking or not switch:
+        if not self.is_walking or not switch_walking:
             return
 
         # 获取机器人当前位置和朝向
@@ -1496,6 +1510,7 @@ class SquatController:
                     xy[0], xy[1],
                     current_quat[0], current_quat[1], current_quat[2], current_quat[3]
                 )
+
                 if new_cmd:  # 确保命令不是None
                     self.cmd = np.array(new_cmd, dtype=np.float32)
                     cmd = new_cmd  # 更新全局命令
@@ -1506,6 +1521,40 @@ class SquatController:
                 if time.time() % 10 < self.model.opt.timestep:
                     print(
                         f"当前位置: ({current_pos[0]:.2f}, {current_pos[1]:.2f}), 目标: ({xy[0]:.2f}, {xy[1]:.2f}), 距离: {distance:.2f}")
+            else:
+                print("警告: 找不到pelvis节点")
+        except Exception as e:
+            print(f"更新行走命令出错: {e}")
+
+    def update_heading_cmd(self):
+        """更新走路命令"""
+        global switch_heading, heading, cmd
+        # print("update_heading_cmd")
+        # 检查全局走路开关
+        if not self.is_walking or not switch_heading:
+            return
+
+        # 获取机器人当前位置和朝向
+        try:
+            pelvis_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'pelvis')
+            if pelvis_id != -1:
+                # 获取机器人位置和方向
+                current_pos = self.data.xpos[pelvis_id]
+                current_quat = self.data.xquat[pelvis_id]
+
+                # 修改朝向
+                new_cmd = decide_heading_direction(current_quat[0], current_quat[1], current_quat[2], current_quat[3])
+                    
+                if new_cmd:  # 确保命令不是None
+                    self.cmd = np.array(new_cmd, dtype=np.float32)
+                    cmd = new_cmd  # 更新全局命令
+
+                # # 计算到目标的距离
+                # distance = math.sqrt((xy[0] - current_pos[0]) ** 2 + (xy[1] - current_pos[1]) ** 2)
+                # # 可选的进度打印，每10秒一次
+                # if time.time() % 10 < self.model.opt.timestep:
+                #     print(
+                #         f"当前位置: ({current_pos[0]:.2f}, {current_pos[1]:.2f}), 目标: ({xy[0]:.2f}, {xy[1]:.2f}), 距离: {distance:.2f}")
             else:
                 print("警告: 找不到pelvis节点")
         except Exception as e:
@@ -1557,7 +1606,7 @@ class SquatController:
 
     def toggle_squat(self):
         """切换下蹲状态"""
-        global switch
+        global switch_walking, switch_heading
         self.is_squatting = not self.is_squatting
 
         # 如果激活下蹲，确保走路模式关闭
@@ -1567,24 +1616,34 @@ class SquatController:
             self.cmd = np.array([0.0, 0.0, 0.0], dtype=np.float32)
 
             # 只在走路模式启用时改变全局开关
-            if switch:
+            if switch_walking:
                 print("下蹲激活时关闭走路全局开关")
-                switch = False
+                switch_walking = False
+            if switch_heading:
+                print("下蹲激活时关闭朝向调整全局开关")
+                switch_heading = False
 
-            self.squat_phase = 0.8
-            self.squat_direction = 1.0
+            self.height_cmd = 0.34  # 设置为下蹲高度
+            # self.squat_phase = 0.8
+            # self.squat_direction = 1.0
         else:
-            self.squat_direction = -1.0
+            # self.squat_direction = -1.0
 
             # 恢复默认高度
             self.height_cmd = self.default_height_cmd
+            self.is_walking = True
             print(f"下蹲模式已停止, 恢复高度: {self.default_height_cmd:.2f}")
 
     def update(self):
         """更新控制器状态"""
+        global switch_walking, switch_heading
+
         # 更新步行命令
-        if self.is_walking:
+        if self.is_walking and switch_walking:
             self.update_walking_cmd()
+        
+        if self.is_walking and switch_heading:
+            self.update_heading_cmd()
 
         # 不在下蹲或行走状态，恢复默认姿势
         if not self.is_squatting and not self.is_walking:
@@ -1737,9 +1796,9 @@ def decide_movement(x_start, y_start, x_end, y_end, w, x, y, z):
     """
     # 计算起点和终点的距离
     distance = math.sqrt((x_end - x_start) ** 2 + (y_end - y_start) ** 2)
-    if distance <= 0.1:
-        global switch
-        switch = False
+    if distance <= 0.5:
+        global switch_walking
+        switch_walking = False
         print(f"已到达目标点附近({distance:.3f}), 停止移动")
         return 0, 0, 0
 
@@ -1775,6 +1834,31 @@ def decide_movement(x_start, y_start, x_end, y_end, w, x, y, z):
     return cmd_x, cmd_y, cmd_z
 
 
+def decide_heading_direction(w, x, y, z):
+    global heading, switch_heading
+    # 获取当前方向向量
+    current_dx, current_dy = quaternion_to_direction(w, x, y, z)
+
+    # 计算角度差
+    angle_diff = calculate_angle_diff((current_dx, current_dy), heading)
+
+    # 判断是否需要转弯
+    angle_threshold = math.radians(1)  # 1度的阈值
+    turn_speed = 1.0  # 转弯速度
+
+    cmd_x, cmd_y, cmd_z = 0, 0, 0 # keep cmd_x and cmd_y zero
+    # 只转弯不前进
+    if abs(angle_diff) > angle_threshold:
+        if angle_diff > 0:
+            cmd_z = turn_speed
+        else:
+            cmd_z = -turn_speed
+    else:
+        switch_heading = False  # 重置朝向指令, 避免影响goto  TODO: 优化和goto之间的逻辑
+
+    return cmd_x, cmd_y, cmd_z
+
+
 class InputThread(threading.Thread):
     """用户输入线程类"""
 
@@ -1796,7 +1880,7 @@ class InputThread(threading.Thread):
 
     def run(self) -> None:
         """线程主函数"""
-        global xy, switch
+        global xy, switch_walking, switch_heading, heading
 
         print("请输入命令:")
         print("- 输入 'left_pos x y z' 设置左臂目标位置, 例如: left_pos 1.2 -1.5 1.0")
@@ -1808,6 +1892,7 @@ class InputThread(threading.Thread):
         print("- 输入 'squat' 开始/停止下蹲")
         print("- 输入 'walk' 开始/停止走路模式")
         print("- 输入 'goto x y' 设置行走目标位置, 例如: goto 2.0 3.0")
+        print("- 输入 'head x y' 设置面向方向, 例如: head 1.0 0.0")
         print("- 输入 'help' 显示帮助信息")
 
         while True:
@@ -1866,7 +1951,7 @@ class InputThread(threading.Thread):
                 elif cmd == "goto" and len(parts) >= 3:
                     old_xy = xy.copy() if 'xy' in globals() and isinstance(xy, list) and len(xy) == 2 else None
                     xy = [float(parts[1]), float(parts[2])]
-                    switch = True
+                    switch_walking = True
                     if old_xy:
                         # 计算与之前目标的距离
                         dist = math.sqrt((xy[0] - old_xy[0]) ** 2 + (xy[1] - old_xy[1]) ** 2)
@@ -1875,6 +1960,16 @@ class InputThread(threading.Thread):
                         print(f"已设置目标位置: ({xy[0]}, {xy[1]})")
 
                     # 所有有效命令都放入队列
+                    self.input_queue.put(cmd)
+
+                elif cmd == "head" and len(parts) >= 3:
+                    heading = [float(parts[1]), float(parts[2])]
+                    length = math.sqrt(heading[0]**2 + heading[1]**2)
+                    if length != 0:
+                        heading = [heading[0] / length, heading[1] / length]
+                        switch_heading = True
+                    else:
+                        print("方向向量不能为零，请输入有效的方向")
                     self.input_queue.put(cmd)
 
                 elif cmd == "help":
@@ -1888,6 +1983,7 @@ class InputThread(threading.Thread):
                     print("- squat (开始/停止下蹲)")
                     print("- walk (开始/停止走路模式)")
                     print("- goto x y (设置行走目标位置)")
+                    print("- head x y (设置面向方向)")
                     print("- help (显示帮助)")
 
                 else:
@@ -1987,7 +2083,18 @@ def main():
     squat_controller.start()
 
     # 自动开始下蹲
-    squat_controller.toggle_squat()
+    # squat_controller.toggle_squat()
+    squat_controller.toggle_walking()
+
+
+    # ========================= Log for testing ===============================
+    dof_names = [
+    mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, i)
+    for i in range(1, model.njnt)
+    ]
+    print("dof_names:", dof_names)
+    # ========================= Log for testing ===============================
+
 
     # 启动可视化界面
     with mujoco.viewer.launch_passive(model, data) as viewer:
@@ -2059,6 +2166,13 @@ def main():
                         else:
                             squat_controller.cmd = np.array([0.0, 0.0, 0.0], dtype=np.float32)
 
+                    elif user_input == "head":
+                        # 目标位置已经在输入线程中设置
+                        if not squat_controller.is_walking:
+                            squat_controller.toggle_walking()  # 确保走路模式开启
+                        else:
+                            squat_controller.cmd = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+
                 # 显示位置信息
                 if time.time() % 5 < config.simulation_dt:
                     # 显示右臂信息
@@ -2086,8 +2200,8 @@ def main():
                         print(f"左臂位置误差: {np.linalg.norm(pos_error):.4f}")
 
                     # 显示下蹲信息
-                    if squat_controller.is_squatting:
-                        print(f"\n下蹲状态: {squat_controller.squat_phase:.2f}")
+                    # if squat_controller.is_squatting:
+                    #     print(f"\n下蹲状态: {squat_controller.squat_phase:.2f}")
 
                 # 更新可视化
                 viewer.sync()

@@ -1,5 +1,7 @@
 # model path
 policy_path: "{LEGGED_GYM_ROOT_DIR}/pre_train/g1/policy.pt"
+# policy_path: "{LEGGED_GYM_ROOT_DIR}/pre_train/g1/policy_15000.pt"
+
 xml_path: "{LEGGED_GYM_ROOT_DIR}/resources/g1/scene53.xml"
 
 # Total simulation time
@@ -72,7 +74,7 @@ num_obs: 456
 
 cmd_init: [0, 0, 0]
 
-height_cmd: 0.8
+height_cmd: 0.74
 min_height: 0.30
 max_squat_depth: 0.3
 
