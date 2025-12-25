@@ -30,11 +30,24 @@
         <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3"
                  markrgb="0.8 0.8 0.8" width="300" height="300"/>
         <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+
+        <mesh name="cup_mesh" file="SM_Cup_Brush.obj" scale="1.5 1.5 1.5"/>
     </asset>
 
     <worldbody>
         <light pos="1 0 3.5" dir="0 0 -1" directional="true"/>
         <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+
+        <body name="cupppp" pos="1.2 -0.3 1.0">
+            <freejoint/>
+            <!--  仅保留OBJ geom  -->
+            <geom name="cup_obj" type="mesh" mesh="cup_mesh" rgba="0.3 0.8 0.9 1" mass="0.054" condim="4" friction="1 1 1" solimp="1 1 1" solref="0.00001 1" contype="1" conaffinity="1"/>
+        </body>
+
+        <!-- 标记原点 -->
+        <body name="origin" pos="1.8 -1.5 1.0">
+            <site type="sphere" size=".05 .05 .05" rgba="1 0 0 0.5"/>
+        </body>
 
         <body name="box1" pos="1.20 -1.65 0.87">
             <!--qpos 广义位置会增加7个 平移位置(x,y,z)和旋转位置4元数(w,x,y,z)-->

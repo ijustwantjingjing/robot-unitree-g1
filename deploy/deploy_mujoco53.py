@@ -22,8 +22,10 @@ dir_root = os.path.dirname(os.path.abspath(__file__)).replace("deploy", '')
 cmd = [0, 0, 0]  # 行走命令 [前进速度, 侧向速度, 转向速度]
 xy = [0, 0]  # 目标位置 [x, y]
 heading = [0, 0]
+height = 0.74  # 目标高度
 switch_walking = False  # 是否激活行走模式
 switch_heading = False  # 是否激活朝向控制模式
+switch_squat = False  # 是否激活下蹲模式
 
 # 实际应用中可以从场景中提取障碍物信息 障碍物格式：(x, y, z, 半径)
 # 会传入到RRT*算法中，用来躲避障碍物
@@ -248,9 +250,9 @@ class ArmBaseController:
         # 6-11: 右腿6个关节
         # 12-14: 腰部关节
         # 15-21: 左臂7个关节
-        # 22-28: 左手7个关节
-        # 29-35: 右臂7个关节
-        # 36-42: 右手7个关节
+        # 22-33: 左手12个关节
+        # 34-40: 右臂7个关节
+        # 41-52: 右手12个关节
         if arm_side == "left":
             self.arm_joint_indices = list(range(15, 22))  # 左臂关节
             self.hand_joint_indices = list(range(22, 34))  # 左手关节
@@ -651,9 +653,9 @@ class ArmBaseController:
                 [2 * x * z - 2 * w * y, 2 * y * z + 2 * w * x, 1 - 2 * x * x - 2 * y * y]
             ])
 
-        # 将误差转换到基座坐标系
-        R = quat_to_mat(base_quat)
         # 【Jing】不需要进行坐标系转换
+        # 将误差转换到基座坐标系
+        # R = quat_to_mat(base_quat)
         # pos_error = R.T @ pos_error
 
         # 根据误差大小动态调整步长
@@ -1362,12 +1364,6 @@ class SquatController:
         else:
             self.min_height = 0.30
 
-        # 下蹲状态控制
-        self.is_squatting = False
-        # self.squat_phase = 0.8  # 0.0-1.0表示下蹲程度
-        # self.squat_speed = 0.001  # 下蹲速度
-        # self.squat_direction = 1.0  # 1.0表示下蹲，-1.0表示站起
-
         # 走路控制
         self.is_walking = False
 
@@ -1474,12 +1470,12 @@ class SquatController:
     # 添加走路控制功能
     def toggle_walking(self):
         """切换走路状态"""
-        global switch_walking, switch_heading
+        global switch_walking, switch_heading, switch_squat
         self.is_walking = not self.is_walking
         if self.is_walking:
             print("走路模式已激活")
             # 确保下蹲状态关闭
-            self.is_squatting = False
+            switch_squat = False
             self.height_cmd = self.default_height_cmd
             # switch_walking = True
         else:
@@ -1607,11 +1603,10 @@ class SquatController:
 
     def toggle_squat(self):
         """切换下蹲状态"""
-        global switch_walking, switch_heading
-        self.is_squatting = not self.is_squatting
+        global switch_walking, switch_heading, height, switch_squat
 
         # 如果激活下蹲，确保走路模式关闭
-        if self.is_squatting:
+        if switch_squat:
             # 只关闭走路，不影响其他功能
             self.is_walking = False
             self.cmd = np.array([0.0, 0.0, 0.0], dtype=np.float32)
@@ -1624,12 +1619,8 @@ class SquatController:
                 print("下蹲激活时关闭朝向调整全局开关")
                 switch_heading = False
 
-            self.height_cmd = 0.34  # 设置为下蹲高度
-            # self.squat_phase = 0.8
-            # self.squat_direction = 1.0
+            self.height_cmd = height  # 设置为下蹲高度
         else:
-            # self.squat_direction = -1.0
-
             # 恢复默认高度
             self.height_cmd = self.default_height_cmd
             self.is_walking = True
@@ -1637,7 +1628,7 @@ class SquatController:
 
     def update(self):
         """更新控制器状态"""
-        global switch_walking, switch_heading
+        global switch_walking, switch_heading, switch_squat
 
         # 更新步行命令
         if self.is_walking and switch_walking:
@@ -1647,7 +1638,7 @@ class SquatController:
             self.update_heading_cmd()
 
         # 不在下蹲或行走状态，恢复默认姿势
-        if not self.is_squatting and not self.is_walking:
+        if not switch_squat and not self.is_walking:
             self.target_dof_pos = self.config.default_angles[:12].copy() if len(
                 self.config.default_angles) >= 12 else np.zeros(12)
             return
@@ -1819,7 +1810,8 @@ def decide_movement(x_start, y_start, x_end, y_end, w, x, y, z):
 
     # 判断是否需要转弯
     angle_threshold = math.radians(5)  # 5度的阈值
-    forward_speed = min(0.5, distance * 0.3)  # 根据距离动态调整前进速度，并限制最大速度
+    # forward_speed = min(0.5, distance * 0.3)  # 根据距离动态调整前进速度，并限制最大速度
+    forward_speed = min(4.0, distance * 2.4)  # 根据距离动态调整前进速度，并限制最大速度
     turn_speed = 1.0  # 转弯速度
 
     cmd_x, cmd_y, cmd_z = 0, 0, 0
@@ -1881,7 +1873,7 @@ class InputThread(threading.Thread):
 
     def run(self) -> None:
         """线程主函数"""
-        global xy, switch_walking, switch_heading, heading
+        global xy, switch_walking, switch_heading, switch_squat, heading, height
 
         print("请输入命令:")
         print("- 输入 'left_pos x y z' 设置左臂目标位置, 例如: left_pos 1.2 -1.5 1.0")
@@ -1940,7 +1932,13 @@ class InputThread(threading.Thread):
                     print("右手切换命令已接收")
 
                 elif cmd == "squat":
-                    print("下蹲命令已接收")
+                    if len(parts) >= 2:
+                        print("下蹲命令已接收")
+                        height = float(parts[1])
+                        switch_squat = True 
+                    else:
+                        print("下蹲停止")
+                        switch_squat = not switch_squat
                     # 所有有效命令都放入队列
                     self.input_queue.put(cmd)
 
